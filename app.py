@@ -42,8 +42,11 @@ def fetch_timetable_data(intake_code, group_code, week_date):
         
         if "manupulate" in response.text:
             return "BLOCKED"
+        
+        # FIX: Clean malformed HTML from APU API (e.g. colspan="6 text-center")
+        clean_html = response.text.replace('colspan="6 text-center"', 'colspan="6"')
             
-        dfs = pd.read_html(StringIO(response.text))
+        dfs = pd.read_html(StringIO(clean_html))
         
         for df in dfs:
             # Basic validation to check if it's the right table
@@ -379,7 +382,7 @@ if find_btn:
         friend_df = fetch_timetable_data(friend_intake, friend_group, week_start)
         
         if my_df is None or friend_df is None:
-            st.error("Error: Could not retrieve timetables. Check intake codes.")
+            st.error("Error: Could not retrieve timetables. Check Intake Codes and Groups.")
         elif isinstance(my_df, str) and my_df == "BLOCKED":
             st.error("APU WAF Blocked the request. Please wait.")
         else:
