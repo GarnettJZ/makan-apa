@@ -167,19 +167,18 @@ def calculate_gaps(schedule):
             
     return gaps
 
-def find_mutual_gaps(my_gaps, friend_gaps):
-    """Finds overlapping gaps between two schedules."""
-    mutual = []
-    for m in my_gaps:
-        for f in friend_gaps:
-            if m['day'] == f['day']:
-                # Calculate intersection
-                start = max(m['start'], f['start'])
-                end = min(m['end'], f['end'])
+def intersect_two_gap_lists(list1, list2):
+    """Helper: Finds intersection between two lists of gaps."""
+    intersection = []
+    for g1 in list1:
+        for g2 in list2:
+            if g1['day'] == g2['day']:
+                start = max(g1['start'], g2['start'])
+                end = min(g1['end'], g2['end'])
                 
                 if end - start >= 0.5: # Minimum 30 mins mutual
-                   mutual.append({
-                        'day': m['day'],
+                   intersection.append({
+                        'day': g1['day'],
                         'start': start,
                         'end': end,
                         'duration': end - start,
@@ -187,8 +186,23 @@ def find_mutual_gaps(my_gaps, friend_gaps):
                         'type': "Mutual",
                         'is_gap': True,
                         'is_mutual': True
-                   }) 
-    return mutual
+                   })
+    return intersection
+
+def find_mutual_gaps(all_gap_lists):
+    """Finds overlapping gaps across multiple schedules (N-way interaction)."""
+    if not all_gap_lists: return []
+    
+    # Start with the first person's gaps
+    current_mutual = all_gap_lists[0]
+    
+    # Intersect with every subsequent person
+    for next_list in all_gap_lists[1:]:
+        current_mutual = intersect_two_gap_lists(current_mutual, next_list)
+        if not current_mutual:
+            break # No intersection possible if empty
+            
+    return current_mutual
 
 # --- CSS / UI Components ---
 
@@ -369,77 +383,94 @@ default_my_intake = query_params.get("my_intake", "")
 default_my_group = query_params.get("my_group", "")
 default_friend_intake = query_params.get("friend_intake", "")
 default_friend_group = query_params.get("friend_group", "")
+default_friend2_intake = query_params.get("friend2_intake", "")
+default_friend2_group = query_params.get("friend2_group", "")
 default_week = query_params.get("week", "")
 
-# Layout: Remove form to allow instant updates
-c1, c2, c3 = st.columns([2, 2, 1])
+# 2. Toggle UI
+# Auto-enable if friend 2 data is present in URL
+show_friend_2 = st.checkbox("Add another friend?", value=bool(default_friend2_intake), key="toggle_f2")
+
+# Layout logic
+if show_friend_2:
+    cols = st.columns([2, 2, 2, 1]) # Me, F1, F2, Week
+else:
+    cols = st.columns([2, 2, 1])    # Me, F1, Week
 
 # --- Column 1: My Info ---
-with c1:
+with cols[0]:
     st.write("My Intake")
-    
-    # Search Filter
     my_filter = st.text_input("🔍 Filter My Intake", placeholder="Type to search (e.g. CS)", key="filter_my")
     
-    # Filter Options
     filtered_my_intakes = all_intakes
     if my_filter:
         filtered_my_intakes = [i for i in all_intakes if my_filter.upper() in i.upper()]
         
-    # Determine Index
     my_ix = 0
     if default_my_intake in filtered_my_intakes:
         my_ix = filtered_my_intakes.index(default_my_intake)
         
     my_intake = st.selectbox("Select My Intake", filtered_my_intakes, index=my_ix, key="my_intake_code")
-    
-    # Dynamic filtering based on selection
     my_groups = get_groups(s3_data, my_intake)
     
     my_g_ix = 0
     if default_my_group in my_groups:
         my_g_ix = my_groups.index(default_my_group)
-        
     my_group = st.selectbox("My Group", my_groups, index=my_g_ix, key="my_group")
 
-# --- Column 2: Friend Info ---
-with c2:
-    st.write("Friend's Intake")
+# --- Column 2: Friend 1 Info ---
+with cols[1]:
+    st.write("Friend 1")
+    friend_filter = st.text_input("🔍 Filter Friend 1", placeholder="Search...", key="filter_friend")
     
-    # Search Filter
-    friend_filter = st.text_input("🔍 Filter Friend's Intake", placeholder="Type to search...", key="filter_friend")
-    
-    # Filter Options
     filtered_friend_intakes = all_intakes
     if friend_filter:
         filtered_friend_intakes = [i for i in all_intakes if friend_filter.upper() in i.upper()]
         
-    # Determine Index
     f_ix = 0
     if default_friend_intake in filtered_friend_intakes:
          f_ix = filtered_friend_intakes.index(default_friend_intake)
     
-    friend_intake = st.selectbox("Select Friend's Intake", filtered_friend_intakes, index=f_ix, key="friend_intake_code")
-    
+    friend_intake = st.selectbox("Select Friend 1", filtered_friend_intakes, index=f_ix, key="friend_intake_code")
     friend_groups = get_groups(s3_data, friend_intake)
     
     f_g_ix = 0
     if default_friend_group in friend_groups:
         f_g_ix = friend_groups.index(default_friend_group)
-        
-    friend_group = st.selectbox("Friend's Group", friend_groups, index=f_g_ix, key="friend_group")
+    friend_group = st.selectbox("Friend 1 Group", friend_groups, index=f_g_ix, key="friend_group")
 
-# --- Column 3: Time ---
-with c3:
-    st.write("Week") # Match Header style
-    
-    # Add spacer to match the height of the Search Filter text_input in other cols
+# --- Column 3 (Optional): Friend 2 Info ---
+friend2_intake = None
+friend2_group = None
+
+if show_friend_2:
+    with cols[2]:
+        st.write("Friend 2")
+        friend2_filter = st.text_input("🔍 Filter Friend 2", placeholder="Search...", key="filter_friend2")
+        
+        filtered_friend2_intakes = all_intakes
+        if friend2_filter:
+            filtered_friend2_intakes = [i for i in all_intakes if friend2_filter.upper() in i.upper()]
+            
+        f2_ix = 0
+        if default_friend2_intake in filtered_friend2_intakes:
+             f2_ix = filtered_friend2_intakes.index(default_friend2_intake)
+        
+        friend2_intake = st.selectbox("Select Friend 2", filtered_friend2_intakes, index=f2_ix, key="friend2_intake_code")
+        friend2_groups = get_groups(s3_data, friend2_intake)
+        
+        f2_g_ix = 0
+        if default_friend2_group in friend2_groups:
+            f2_g_ix = friend2_groups.index(default_friend2_group)
+        friend2_group = st.selectbox("Friend 2 Group", friend2_groups, index=f2_g_ix, key="friend2_group")
+
+# --- Last Column: Time ---
+with cols[-1]:
+    st.write("Week")
     st.write("") 
     st.write("")
     
-    # Use the discovered weeks
     default_w_ix = 0
-    # Try to select current week if possible or from URL
     if default_week and default_week in available_weeks:
         default_w_ix = available_weeks.index(default_week)
     else:
@@ -448,55 +479,76 @@ with c3:
             default_w_ix = available_weeks.index(current_mon)
         
     selected_week = st.selectbox("Select Week", available_weeks, index=default_w_ix, key="week_select")
-    
-    st.write("") # Spacer
+    st.write("")
 
-# --- Sync to URL ---
-# Update params whenever we run successfully
-if my_intake and my_group and friend_intake and friend_group and selected_week:
+# --- Sync to URL & Process ---
+# Base validation
+is_valid = my_intake and my_group and friend_intake and friend_group and selected_week
+if show_friend_2:
+    is_valid = is_valid and friend2_intake and friend2_group
+
+if is_valid:
+    # Update Params
     st.query_params["my_intake"] = my_intake
     st.query_params["my_group"] = my_group
     st.query_params["friend_intake"] = friend_intake
     st.query_params["friend_group"] = friend_group
     st.query_params["week"] = selected_week
     
-    # Process Schedules from S3 data
+    if show_friend_2:
+        st.query_params["friend2_intake"] = friend2_intake
+        st.query_params["friend2_group"] = friend2_group
+    else:
+        # Clear friend 2 params if toggled off
+        if "friend2_intake" in st.query_params: del st.query_params["friend2_intake"]
+        if "friend2_group" in st.query_params: del st.query_params["friend2_group"]
+    
+    # Process Schedules
     my_schedule = process_s3_schedule(s3_data, my_intake, my_group, selected_week)
     friend_schedule = process_s3_schedule(s3_data, friend_intake, friend_group, selected_week)
     
-    if not my_schedule:
-        st.warning(f"No classes found for {my_intake} ({my_group}) in week starting {selected_week}.")
-    if not friend_schedule:
-        st.warning(f"No classes found for {friend_intake} ({friend_group}) in week starting {selected_week}.")
+    schedules_map = {
+        "Me": {"data": my_schedule, "intake": my_intake, "group": my_group},
+        "Friend 1": {"data": friend_schedule, "intake": friend_intake, "group": friend_group}
+    }
+    
+    if show_friend_2:
+        f2_schedule = process_s3_schedule(s3_data, friend2_intake, friend2_group, selected_week)
+        schedules_map["Friend 2"] = {"data": f2_schedule, "intake": friend2_intake, "group": friend2_group}
+
+    # Check for empty schedules
+    all_found = True
+    for name, info in schedules_map.items():
+        if not info["data"]:
+            st.warning(f"No classes found for {name} ({info['intake']} - {info['group']}) in week starting {selected_week}.")
+            all_found = False
+            
+    if all_found:
+        # 1. Calc Gaps
+        all_gap_lists = []
+        for name, info in schedules_map.items():
+            gaps = calculate_gaps(info["data"])
+            all_gap_lists.append(gaps)
+            info["gaps"] = gaps # Store for reference
         
-    if my_schedule and friend_schedule:
-        # 1. Add gaps
-        my_schedule_gaps = calculate_gaps(my_schedule)
-        friend_schedule_gaps = calculate_gaps(friend_schedule)
-        
-        # 2. Find mutual
-        mutual_gaps = find_mutual_gaps(my_schedule_gaps, friend_schedule_gaps)
+        # 2. Find Mutual (N-way)
+        mutual_gaps = find_mutual_gaps(all_gap_lists)
         
         if mutual_gaps:
-             st.success(f"Found {len(mutual_gaps)} mutual breaks! 🍱")
+             st.success(f"Found {len(mutual_gaps)} mutual breaks across {len(schedules_map)} schedules! 🍱")
         else:
              st.info("No mutual breaks found unfortunately.")
         
-        # 3. Combine for display
-        my_display_events = my_schedule + mutual_gaps
-        friend_display_events = friend_schedule + mutual_gaps
+        # 3. Combine & Display
+        cols_display = st.columns(len(schedules_map))
         
-        # --- Render Side-by-Side Grids ---
-        
-        # Use columns to separate the two schedules
-        col_me, col_friend = st.columns(2)
-        
-        with col_me:
-            st.subheader(f"👤 {my_intake} ({my_group})")
-            st.markdown(render_grid_html(my_display_events), unsafe_allow_html=True)
-            
-        with col_friend:
-            st.subheader(f"👥 {friend_intake} ({friend_group})")
-            st.markdown(render_grid_html(friend_display_events), unsafe_allow_html=True)
+        idx = 0
+        for name, info in schedules_map.items():
+            display_events = info["data"] + mutual_gaps
+            with cols_display[idx]:
+                st.subheader(f"{'👤' if name=='Me' else '👥'} {info['intake']} ({info['group']})")
+                st.markdown(render_grid_html(display_events), unsafe_allow_html=True)
+            idx += 1
+
 else:
-    st.info("Please select intakes and groups to view the timetable.")
+    st.info("Please select intakes and groups for all active friends.")
