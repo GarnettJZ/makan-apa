@@ -297,7 +297,7 @@ def inject_custom_css():
     .timetable-grid {
         display: grid;
         grid-template-columns: 60px repeat(5, 1fr); /* Time col + 5 days */
-        grid-template-rows: 40px repeat(48, 1fr); /* Header + 12 hours * 4 slots */
+        grid-template-rows: 40px repeat(48, 20px); /* Header + 12 hours * 4 slots * 20px fixed height */
         column-gap: 8px; /* Gap between columns */
         row-gap: 0px; /* No gap between rows to form continuous lines */
         background-color: #fff;
