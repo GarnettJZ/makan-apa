@@ -352,7 +352,7 @@ def render_grid_html(events):
 
 # --- Main App Logic ---
 
-st.title("🍱 Bila Nak Makan")
+st.title("🍱 Bila Nak Makan?")
 
 inject_custom_css()
 
@@ -431,6 +431,12 @@ with c2:
 
 # --- Column 3: Time ---
 with c3:
+    st.write("Week") # Match Header style
+    
+    # Add spacer to match the height of the Search Filter text_input in other cols
+    st.write("") 
+    st.write("")
+    
     # Use the discovered weeks
     default_w_ix = 0
     # Try to select current week if possible or from URL
