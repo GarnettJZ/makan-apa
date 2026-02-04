@@ -4,30 +4,27 @@ import requests
 from io import StringIO
 from datetime import datetime, timedelta
 
-# --- PAGE SETUP ---
 st.set_page_config(page_title="APU Gap Finder", page_icon="🍱")
 
-# --- HEADERS (Your "VIP Pass") ---
-# These are the exact headers you captured that work
+# Timetable API Headers
 HEADERS = {
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
     'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-    'sec-fetch-site': 'none', # Critical for bypassing WAF
+    'sec-fetch-site': 'none',
     'upgrade-insecure-requests': '1',
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
 }
 
 BASE_URL = 'https://api.apiit.edu.my/timetable-print/index.php'
 
-# --- HELPER FUNCTIONS ---
 def get_start_of_week():
     """Auto-calculates the Monday of the current week."""
     today = datetime.now()
     start = today - timedelta(days=today.weekday())
     return start.strftime("%Y-%m-%d")
 
-@st.cache_data(ttl=600) # Cache for 10 mins so you don't spam the server
+@st.cache_data(ttl=600)
 def fetch_and_parse(intake_code, group_code, week_date):
     params = {
         'Week': week_date,
@@ -39,13 +36,11 @@ def fetch_and_parse(intake_code, group_code, week_date):
     try:
         response = requests.get(BASE_URL, headers=HEADERS, params=params)
         
-        # Security Check
         if "manupulate" in response.text:
             return "BLOCKED"
             
         dfs = pd.read_html(StringIO(response.text))
         
-        # Find the correct table
         for df in dfs:
             if "DATE" in df.to_string().upper():
                 if "DATE" not in str(df.columns).upper():
@@ -78,10 +73,8 @@ def extract_busy_slots(df):
             except: continue
     return busy
 
-# --- THE PHONE GUI ---
 st.title("🍱 Makan Time Finder")
 
-# 1. Inputs (Saved defaults)
 with st.expander("Configuration", expanded=True):
     col1, col2 = st.columns(2)
     with col1:
@@ -91,22 +84,18 @@ with st.expander("Configuration", expanded=True):
         friend_intake = st.text_input("Friend Intake", "APD3F2601IT(CE)")
         friend_group = st.text_input("Friend Group", "G1")
     
-    # Auto-select this Monday
     week_start = st.text_input("Week Starting (YYYY-MM-DD)", get_start_of_week())
 
-# 2. The Button
 if st.button("Find Mutual Gaps", type="primary", use_container_width=True):
     with st.spinner("Checking APSpace..."):
-        # Fetch Data
         my_df = fetch_and_parse(my_intake, my_group, week_start)
         friend_df = fetch_and_parse(friend_intake, friend_group, week_start)
         
-        if my_df == "BLOCKED" or friend_df == "BLOCKED":
+        if (isinstance(my_df, str) and my_df == "BLOCKED") or (isinstance(friend_df, str) and friend_df == "BLOCKED"):
             st.error("❌ Request Blocked by APU WAF. Try again later.")
         elif my_df is None or friend_df is None:
             st.error("⚠️ Could not find timetable data. Check Intake Codes.")
         else:
-            # Calculate Gaps
             my_busy = extract_busy_slots(my_df)
             friend_busy = extract_busy_slots(friend_df)
             
@@ -124,7 +113,6 @@ if st.button("Find Mutual Gaps", type="primary", use_container_width=True):
                         for slot in timeline:
                             if s <= slot < e: timeline[slot] = False
                 
-                # Find continuous gaps
                 gaps = []
                 start = None
                 sorted_slots = sorted(timeline.keys())
