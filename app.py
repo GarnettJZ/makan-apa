@@ -49,6 +49,21 @@ def get_groups(data, intake_code):
     groups = sorted(list(set(item['GROUPING'] for item in data if item.get('INTAKE') == intake_code)))
     return groups
 
+@st.cache_data
+def get_available_weeks(data):
+    """Extracts available weeks from the dataset."""
+    if not data: return []
+    dates = set()
+    for item in data:
+        if 'TIME_FROM_ISO' in item:
+            dt = datetime.fromisoformat(item['TIME_FROM_ISO'])
+            # Get Monday of the week
+            monday = dt - timedelta(days=dt.weekday())
+            dates.add(monday.date())
+    
+    sorted_mondays = sorted(list(dates))
+    return [d.strftime("%Y-%m-%d") for d in sorted_mondays]
+
 def parse_iso_time(iso_str):
     """Parses ISO time string to decimal hour."""
     try:
@@ -62,13 +77,29 @@ def process_s3_schedule(data, intake_code, group_code, week_date_str=None):
     schedule = []
     
     # Filter data
-    # Note: week_date_str from date_input is used to filter events if data spans multiple weeks.
-    # The current S3 dump seems to be a single week dump (based on previous analysis).
+    # Filter by Intake, Group, and optionally Week
+    filtered_items = []
     
-    filtered_items = [
-        item for item in data 
-        if item.get('INTAKE') == intake_code and item.get('GROUPING') == group_code
-    ]
+    week_start_dt = None
+    if week_date_str:
+        week_start_dt = datetime.strptime(week_date_str, "%Y-%m-%d").date()
+        # End of the week (Sunday)
+        week_end_dt = week_start_dt + timedelta(days=6)
+    
+    for item in data:
+        if item.get('INTAKE') != intake_code or item.get('GROUPING') != group_code:
+            continue
+            
+        if week_start_dt:
+            # Check if event falls within the week
+            try:
+                event_dt = datetime.fromisoformat(item.get('TIME_FROM_ISO')).date()
+                if not (week_start_dt <= event_dt <= week_end_dt):
+                    continue
+            except:
+                continue
+                
+        filtered_items.append(item)
 
     for item in filtered_items:
         # Parse Day: S3 has "MON", "TUE" -> Convert to "Mon", "Tue"
@@ -321,82 +352,145 @@ def render_grid_html(events):
 
 # --- Main App Logic ---
 
-st.title("🍱 Makan Time Finder")
-st.write("Using APU's auto-generated timetable data.")
+st.title("🍱 Bila Nak Makan")
 
 inject_custom_css()
 
 # Fetch all data first
 s3_data = fetch_s3_data()
 all_intakes = get_intakes(s3_data)
+available_weeks = get_available_weeks(s3_data)
 
-with st.form("timetable_form"):
-    c1, c2, c3 = st.columns([2, 2, 1])
+# --- State Management & Persistence ---
+
+# 1. Read Defaults from URL
+query_params = st.query_params
+default_my_intake = query_params.get("my_intake", "")
+default_my_group = query_params.get("my_group", "")
+default_friend_intake = query_params.get("friend_intake", "")
+default_friend_group = query_params.get("friend_group", "")
+default_week = query_params.get("week", "")
+
+# Layout: Remove form to allow instant updates
+c1, c2, c3 = st.columns([2, 2, 1])
+
+# --- Column 1: My Info ---
+with c1:
+    st.write("My Intake")
     
-    with c1:
-        st.write("My Intake")
-        # Default options and index logic can be added, for now just 0
-        my_intake = st.selectbox("Select My Intake", all_intakes, key="my_intake_code", 
-                                 help="Start typing to search your intake code")
+    # Search Filter
+    my_filter = st.text_input("🔍 Filter My Intake", placeholder="Type to search (e.g. CS)", key="filter_my")
+    
+    # Filter Options
+    filtered_my_intakes = all_intakes
+    if my_filter:
+        filtered_my_intakes = [i for i in all_intakes if my_filter.upper() in i.upper()]
         
-        my_groups = get_groups(s3_data, my_intake)
-        my_group = st.selectbox("My Group", my_groups, key="my_group")
+    # Determine Index
+    my_ix = 0
+    if default_my_intake in filtered_my_intakes:
+        my_ix = filtered_my_intakes.index(default_my_intake)
         
-    with c2:
-        st.write("Friend's Intake")
-        friend_intake = st.selectbox("Select Friend's Intake", all_intakes, key="friend_intake_code")
+    my_intake = st.selectbox("Select My Intake", filtered_my_intakes, index=my_ix, key="my_intake_code")
+    
+    # Dynamic filtering based on selection
+    my_groups = get_groups(s3_data, my_intake)
+    
+    my_g_ix = 0
+    if default_my_group in my_groups:
+        my_g_ix = my_groups.index(default_my_group)
         
-        friend_groups = get_groups(s3_data, friend_intake)
-        friend_group = st.selectbox("Friend's Group", friend_groups, key="friend_group")
+    my_group = st.selectbox("My Group", my_groups, index=my_g_ix, key="my_group")
 
-    with c3:
-        week_input = st.date_input("Week Of", value=datetime.today())
-        st.write("") # Spacer
-        st.write("") 
-        submitted = st.form_submit_button("Find Mutual", type="primary", use_container_width=True)
+# --- Column 2: Friend Info ---
+with c2:
+    st.write("Friend's Intake")
+    
+    # Search Filter
+    friend_filter = st.text_input("🔍 Filter Friend's Intake", placeholder="Type to search...", key="filter_friend")
+    
+    # Filter Options
+    filtered_friend_intakes = all_intakes
+    if friend_filter:
+        filtered_friend_intakes = [i for i in all_intakes if friend_filter.upper() in i.upper()]
+        
+    # Determine Index
+    f_ix = 0
+    if default_friend_intake in filtered_friend_intakes:
+         f_ix = filtered_friend_intakes.index(default_friend_intake)
+    
+    friend_intake = st.selectbox("Select Friend's Intake", filtered_friend_intakes, index=f_ix, key="friend_intake_code")
+    
+    friend_groups = get_groups(s3_data, friend_intake)
+    
+    f_g_ix = 0
+    if default_friend_group in friend_groups:
+        f_g_ix = friend_groups.index(default_friend_group)
+        
+    friend_group = st.selectbox("Friend's Group", friend_groups, index=f_g_ix, key="friend_group")
 
-if submitted:
-    if not (my_intake and my_group and friend_intake and friend_group):
-        st.error("Please select valid intakes and groups for both persons.")
+# --- Column 3: Time ---
+with c3:
+    # Use the discovered weeks
+    default_w_ix = 0
+    # Try to select current week if possible or from URL
+    if default_week and default_week in available_weeks:
+        default_w_ix = available_weeks.index(default_week)
     else:
-        # Process Schedules from S3 data (No fetching needed!)
-        my_schedule = process_s3_schedule(s3_data, my_intake, my_group)
-        friend_schedule = process_s3_schedule(s3_data, friend_intake, friend_group)
+        current_mon = get_start_of_week()
+        if current_mon in available_weeks:
+            default_w_ix = available_weeks.index(current_mon)
         
-        if not my_schedule:
-            st.warning(f"No classes found for {my_intake} ({my_group}).")
-        if not friend_schedule:
-            st.warning(f"No classes found for {friend_intake} ({friend_group}).")
+    selected_week = st.selectbox("Select Week", available_weeks, index=default_w_ix, key="week_select")
+    
+    st.write("") # Spacer
+
+# --- Sync to URL ---
+# Update params whenever we run successfully
+if my_intake and my_group and friend_intake and friend_group and selected_week:
+    st.query_params["my_intake"] = my_intake
+    st.query_params["my_group"] = my_group
+    st.query_params["friend_intake"] = friend_intake
+    st.query_params["friend_group"] = friend_group
+    st.query_params["week"] = selected_week
+    
+    # Process Schedules from S3 data
+    my_schedule = process_s3_schedule(s3_data, my_intake, my_group, selected_week)
+    friend_schedule = process_s3_schedule(s3_data, friend_intake, friend_group, selected_week)
+    
+    if not my_schedule:
+        st.warning(f"No classes found for {my_intake} ({my_group}) in week starting {selected_week}.")
+    if not friend_schedule:
+        st.warning(f"No classes found for {friend_intake} ({friend_group}) in week starting {selected_week}.")
+        
+    if my_schedule and friend_schedule:
+        # 1. Add gaps
+        my_schedule_gaps = calculate_gaps(my_schedule)
+        friend_schedule_gaps = calculate_gaps(friend_schedule)
+        
+        # 2. Find mutual
+        mutual_gaps = find_mutual_gaps(my_schedule_gaps, friend_schedule_gaps)
+        
+        if mutual_gaps:
+             st.success(f"Found {len(mutual_gaps)} mutual breaks! 🍱")
+        else:
+             st.info("No mutual breaks found unfortunately.")
+        
+        # 3. Combine for display
+        my_display_events = my_schedule + mutual_gaps
+        friend_display_events = friend_schedule + mutual_gaps
+        
+        # --- Render Side-by-Side Grids ---
+        
+        # Use columns to separate the two schedules
+        col_me, col_friend = st.columns(2)
+        
+        with col_me:
+            st.subheader(f"👤 {my_intake} ({my_group})")
+            st.markdown(render_grid_html(my_display_events), unsafe_allow_html=True)
             
-        if my_schedule and friend_schedule:
-            # 1. Add gaps
-            my_schedule_gaps = calculate_gaps(my_schedule)
-            friend_schedule_gaps = calculate_gaps(friend_schedule)
-            
-            # 2. Find mutual
-            mutual_gaps = find_mutual_gaps(my_schedule_gaps, friend_schedule_gaps)
-            
-            if mutual_gaps:
-                st.success(f"Found {len(mutual_gaps)} mutual breaks! 🍱")
-            else:
-                st.info("No mutual breaks found unfortunately.")
-            
-            # 3. Combine for display
-            # We want to show: My Events + Mutual Gaps (highlighted)
-            # Friend Events + Mutual Gaps (highlighted)
-            
-            my_display_events = my_schedule + mutual_gaps
-            friend_display_events = friend_schedule + mutual_gaps
-            
-            # --- Render Side-by-Side Grids ---
-            
-            # Use columns to separate the two schedules
-            col_me, col_friend = st.columns(2)
-            
-            with col_me:
-                st.subheader(f"👤 {my_intake} ({my_group})")
-                st.markdown(render_grid_html(my_display_events), unsafe_allow_html=True)
-                
-            with col_friend:
-                st.subheader(f"👥 {friend_intake} ({friend_group})")
-                st.markdown(render_grid_html(friend_display_events), unsafe_allow_html=True)
+        with col_friend:
+            st.subheader(f"👥 {friend_intake} ({friend_group})")
+            st.markdown(render_grid_html(friend_display_events), unsafe_allow_html=True)
+else:
+    st.info("Please select intakes and groups to view the timetable.")
