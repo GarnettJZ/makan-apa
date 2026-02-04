@@ -11,12 +11,8 @@ st.set_page_config(page_title="APU Gap Finder", page_icon="🍱", layout="wide")
 HEADERS = {
     'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
     'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-    'sec-ch-ua': '"Not(A:Brand";v="8", "Chromium";v="144", "Google Chrome";v="144"',
-    'sec-fetch-site': 'none',
-    'upgrade-insecure-requests': '1',
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
 }
-BASE_URL = 'https://api.apiit.edu.my/timetable-print/index.php'
 DAYS_OF_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri"]
 
 # --- Helper Functions ---
@@ -27,106 +23,81 @@ def get_start_of_week():
     start = today - timedelta(days=today.weekday())
     return start.strftime("%Y-%m-%d")
 
-@st.cache_data(ttl=600)
-def fetch_timetable_data(intake_code, group_code, week_date):
-    """Fetches raw timetable HTML and returns a DataFrame."""
-    params = {
-        'Week': week_date,
-        'Intake': intake_code,
-        'Intake_Group': group_code,
-        'print_request': 'print_tt'
-    }
-    
+@st.cache_data(ttl=21600)  # Cache for 6 hours
+def fetch_s3_data():
+    """Fetches key APU timetable data from S3."""
     try:
-        response = requests.get(BASE_URL, headers=HEADERS, params=params)
-        
-        if "manupulate" in response.text:
-            return "BLOCKED"
-        
-        # FIX: Clean malformed HTML from APU API (e.g. colspan="6 text-center")
-        clean_html = response.text.replace('colspan="6 text-center"', 'colspan="6"')
-            
-        dfs = pd.read_html(StringIO(clean_html))
-        
-        for df in dfs:
-            # Basic validation to check if it's the right table
-            if "DATE" in df.to_string().upper(): 
-                # Clean up MultiIndex headers if necessary
-                if "DATE" not in str(df.columns).upper():
-                     df.columns = df.iloc[0]
-                     df = df[1:]
-                return df
-        return None
-    except Exception:
-        return None
+        url = "https://s3-ap-southeast-1.amazonaws.com/open-ws/weektimetable"
+        response = requests.get(url)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        st.error(f"Failed to fetch data from S3: {e}")
+        return []
 
-def parse_time_str(time_str):
-    """Parses '08:30 - 10:30' into (8.5, 10.5)."""
+@st.cache_data
+def get_intakes(data):
+    """Extracts unique sorted intake codes from S3 data."""
+    if not data: return []
+    intakes = sorted(list(set(item['INTAKE'] for item in data if 'INTAKE' in item)))
+    return intakes
+
+@st.cache_data
+def get_groups(data, intake_code):
+    """Extracts unique sorted groups for a specific intake."""
+    if not data: return []
+    groups = sorted(list(set(item['GROUPING'] for item in data if item.get('INTAKE') == intake_code)))
+    return groups
+
+def parse_iso_time(iso_str):
+    """Parses ISO time string to decimal hour."""
     try:
-        start_str, end_str = time_str.split("-")
-        sh, sm = map(int, start_str.strip().split(":"))
-        eh, em = map(int, end_str.strip().split(":"))
-        return sh + sm/60, eh + em/60
+        dt = datetime.fromisoformat(iso_str)
+        return dt.hour + dt.minute / 60
     except:
-        return None, None
+        return None
 
-def extract_schedule(df):
-    """
-    Parses dataframe into a list of event dictionaries.
-    Event structure:
-    {
-        'day': 'Mon', 
-        'start': 8.5, 
-        'end': 10.5, 
-        'duration': 2.0,
-        'subject': 'CT044-3-1-DSTR', 
-        'type': 'L',  # Derived logic
-        'location': 'B-05-04',
-        'raw_date': 'Mon, 02-Feb-2026'
-    }
-    """
+def process_s3_schedule(data, intake_code, group_code, week_date_str=None):
+    """Processes S3 data for a specific intake and group."""
     schedule = []
-    if isinstance(df, str) or df is None: return []
     
-    # Normalize columns
-    df.columns = [str(c).upper().strip() for c in df.columns]
-    date_col = next((c for c in df.columns if "DATE" in c), None)
-    time_col = next((c for c in df.columns if "TIME" in c), None)
-    subj_col = next((c for c in df.columns if "SUBJECT" in c), None)
-    loc_col = next((c for c in df.columns if "CLASSROOM" in c or "LOCATION" in c), None)
+    # Filter data
+    # Note: week_date_str from date_input is used to filter events if data spans multiple weeks.
+    # The current S3 dump seems to be a single week dump (based on previous analysis).
     
-    if not date_col or not time_col: return []
+    filtered_items = [
+        item for item in data 
+        if item.get('INTAKE') == intake_code and item.get('GROUPING') == group_code
+    ]
 
-    for _, row in df.iterrows():
-        d_str = str(row[date_col])
-        t_str = str(row[time_col])
-        
-        # Determine Day of Week
-        day_match = None
-        for day in DAYS_OF_WEEK:
-            if day in d_str:
-                day_match = day
-                break
-        
-        if not day_match: continue
+    for item in filtered_items:
+        # Parse Day: S3 has "MON", "TUE" -> Convert to "Mon", "Tue"
+        day_map = {
+            'MON': 'Mon', 'TUE': 'Tue', 'WED': 'Wed', 'THU': 'Thu', 'FRI': 'Fri'
+        }
+        raw_day = item.get('DAY')
+        day = day_map.get(raw_day)
         
         # Parse Time
-        start, end = parse_time_str(t_str)
-        if start is None or end is None: continue
+        start = parse_iso_time(item.get('TIME_FROM_ISO'))
+        end = parse_iso_time(item.get('TIME_TO_ISO'))
         
-        # Extract Subject Info
-        subject = str(row[subj_col]) if subj_col else "Unknown"
-        location = str(row[loc_col]) if loc_col else ""
+        if not day or start is None or end is None:
+            continue
+
+        # Extract Meta
+        subject = item.get('MODULE_NAME', item.get('MODID', 'Unknown'))
+        location = item.get('ROOM', item.get('LOCATION', 'Unknown'))
+        modid = item.get('MODID', '')
         
-        # Simple heuristic for type (Lecture/Tutorial/Lab)
-        # This is guesswork based on typical APU codes, can be refined
+        # Function to determine class type from MODID
         class_type = "Class"
-        if "(L)" in subject or "-L-" in subject: class_type = "Lecture"
-        elif "(T)" in subject or "-T-" in subject: class_type = "Tutorial"
-        elif "(LAB)" in subject or "-LAB-" in subject: class_type = "Lab"
-        
+        if "-L-" in modid or "(L)" in modid: class_type = "Lecture"
+        elif "-T-" in modid or "(T)" in modid: class_type = "Tutorial"
+        elif "-LAB-" in modid or "(LAB)" in modid: class_type = "Lab"
+
         schedule.append({
-            'day': day_match,
+            'day': day,
             'start': start,
             'end': end,
             'duration': end - start,
@@ -163,12 +134,6 @@ def calculate_gaps(schedule):
                     })
             current_time = max(current_time, event['end'])
             
-        # Optional: Add end-of-day gap until 20.0 ?
-        # For now, let's keep it strictly between classes or leading up to them if we want to fill the grid.
-        # But specifically for "Makan Time", we usually care about gaps *between* classes.
-        # To fill the grid visually, we might need filler blocks? 
-        # Let's just track functional gaps.
-        
     return gaps
 
 def find_mutual_gaps(my_gaps, friend_gaps):
@@ -357,63 +322,81 @@ def render_grid_html(events):
 # --- Main App Logic ---
 
 st.title("🍱 Makan Time Finder")
-
-with st.container():
-    col1, col2, col3, col4 = st.columns([2, 2, 2, 1])
-    with col1:
-        my_intake = st.text_input("My Intake", "APD3F2601CS(CYB)")
-        my_group = st.text_input("Group", "G3")
-    with col2:
-        friend_intake = st.text_input("Friend's Intake", "APD3F2601IT(CE)")
-        friend_group = st.text_input("Group", "G1")
-    with col3:
-        week_start = st.text_input("Week Of", get_start_of_week())
-    with col4:
-        st.write("") # Spacer
-        st.write("") 
-        find_btn = st.button("Find Mutual", type="primary", use_container_width=True)
+st.write("Using APU's auto-generated timetable data.")
 
 inject_custom_css()
 
-if find_btn:
-    with st.spinner("Crunching timetables..."):
-        # Fetch
-        my_df = fetch_timetable_data(my_intake, my_group, week_start)
-        friend_df = fetch_timetable_data(friend_intake, friend_group, week_start)
+# Fetch all data first
+s3_data = fetch_s3_data()
+all_intakes = get_intakes(s3_data)
+
+with st.form("timetable_form"):
+    c1, c2, c3 = st.columns([2, 2, 1])
+    
+    with c1:
+        st.write("My Intake")
+        # Default options and index logic can be added, for now just 0
+        my_intake = st.selectbox("Select My Intake", all_intakes, key="my_intake_code", 
+                                 help="Start typing to search your intake code")
         
-        if my_df is None or friend_df is None:
-            st.error("Error: Could not retrieve timetables. Check Intake Codes and Groups.")
-        elif isinstance(my_df, str) and my_df == "BLOCKED":
-            st.error("APU WAF Blocked the request. Please wait.")
-        else:
-            # Parse
-            my_schedule = extract_schedule(my_df)
-            friend_schedule = extract_schedule(friend_df)
+        my_groups = get_groups(s3_data, my_intake)
+        my_group = st.selectbox("My Group", my_groups, key="my_group")
+        
+    with c2:
+        st.write("Friend's Intake")
+        friend_intake = st.selectbox("Select Friend's Intake", all_intakes, key="friend_intake_code")
+        
+        friend_groups = get_groups(s3_data, friend_intake)
+        friend_group = st.selectbox("Friend's Group", friend_groups, key="friend_group")
+
+    with c3:
+        week_input = st.date_input("Week Of", value=datetime.today())
+        st.write("") # Spacer
+        st.write("") 
+        submitted = st.form_submit_button("Find Mutual", type="primary", use_container_width=True)
+
+if submitted:
+    if not (my_intake and my_group and friend_intake and friend_group):
+        st.error("Please select valid intakes and groups for both persons.")
+    else:
+        # Process Schedules from S3 data (No fetching needed!)
+        my_schedule = process_s3_schedule(s3_data, my_intake, my_group)
+        friend_schedule = process_s3_schedule(s3_data, friend_intake, friend_group)
+        
+        if not my_schedule:
+            st.warning(f"No classes found for {my_intake} ({my_group}).")
+        if not friend_schedule:
+            st.warning(f"No classes found for {friend_intake} ({friend_group}).")
             
-            # Gaps
-            my_gaps = calculate_gaps(my_schedule)
-            friend_gaps = calculate_gaps(friend_schedule)
-            mutual_gaps = find_mutual_gaps(my_gaps, friend_gaps)
+        if my_schedule and friend_schedule:
+            # 1. Add gaps
+            my_schedule_gaps = calculate_gaps(my_schedule)
+            friend_schedule_gaps = calculate_gaps(friend_schedule)
             
-            st.success(f"Found {len(mutual_gaps)} mutual breaks! 🍱")
+            # 2. Find mutual
+            mutual_gaps = find_mutual_gaps(my_schedule_gaps, friend_schedule_gaps)
             
-            # Prepare Combined Event Lists for Rendering
-            # We want each person's grid to show THEIR classes + MUTUAL gaps
-            # Standard single-person gaps are hidden/optional? 
-            # Prompt says "only show the mutual break". 
-            # So let's include: MyClasses + MutualGaps (Highlighted). 
-            # Standard gaps can be just empty space (not rendered as blocks).
+            if mutual_gaps:
+                st.success(f"Found {len(mutual_gaps)} mutual breaks! 🍱")
+            else:
+                st.info("No mutual breaks found unfortunately.")
             
-            my_events_final = my_schedule + mutual_gaps
-            friend_events_final = friend_schedule + mutual_gaps
+            # 3. Combine for display
+            # We want to show: My Events + Mutual Gaps (highlighted)
+            # Friend Events + Mutual Gaps (highlighted)
             
-            # Layout Side-by-Side
-            grid_col1, grid_col2 = st.columns(2)
+            my_display_events = my_schedule + mutual_gaps
+            friend_display_events = friend_schedule + mutual_gaps
             
-            with grid_col1:
-                st.subheader(f"👤 {my_intake}")
-                st.markdown(render_grid_html(my_events_final), unsafe_allow_html=True)
+            # --- Render Side-by-Side Grids ---
+            
+            # Use columns to separate the two schedules
+            col_me, col_friend = st.columns(2)
+            
+            with col_me:
+                st.subheader(f"👤 {my_intake} ({my_group})")
+                st.markdown(render_grid_html(my_display_events), unsafe_allow_html=True)
                 
-            with grid_col2:
-                st.subheader(f"👥 {friend_intake}")
-                st.markdown(render_grid_html(friend_events_final), unsafe_allow_html=True)
+            with col_friend:
+                st.subheader(f"👥 {friend_intake} ({friend_group})")
+                st.markdown(render_grid_html(friend_display_events), unsafe_allow_html=True)
