@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
 import requests
-from io import StringIO
+from io import StringIO, BytesIO
 from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 # Page Config
 st.set_page_config(page_title="APU Gap Finder", page_icon="🍱", layout="wide")
@@ -203,6 +205,88 @@ def find_mutual_gaps(all_gap_lists):
             break # No intersection possible if empty
             
     return current_mutual
+
+def generate_schedule_image(schedules_map, mutual_gaps):
+    """Generates a matplotlib figure of the compared schedules."""
+    
+    n_cols = len(schedules_map)
+    fig, axes = plt.subplots(1, n_cols, figsize=(5 * n_cols, 10), sharey=True)
+    if n_cols == 1: axes = [axes] # Handle single plot case
+    
+    plt.subplots_adjust(wspace=0.1)
+    
+    # Colors
+    colors = {
+        'Lecture': '#ffe4e1', 'Tutorial': '#e3f2fd', 'Lab': '#e8f5e9', 
+        'Gap': '#f8f9fa', 'Mutual': '#fff3bf'
+    }
+    edge_colors = {
+        'Lecture': '#ff6b6b', 'Tutorial': '#2196f3', 'Lab': '#4caf50',
+        'Gap': '#dee2e6', 'Mutual': '#fab005'
+    }
+    
+    day_map_idx = {d: i for i, d in enumerate(DAYS_OF_WEEK)}
+    
+    for idx, (name, info) in enumerate(schedules_map.items()):
+        ax = axes[idx]
+        ax.set_title(f"{name}\n{info.get('intake','')}\n({info.get('group','')})", fontsize=10, pad=10)
+        
+        # Set grid
+        ax.set_xlim(0, 5)
+        ax.set_ylim(20, 8) # Inverted Y axis: 8am to 8pm
+        ax.set_xticks([0.5, 1.5, 2.5, 3.5, 4.5])
+        ax.set_xticklabels(DAYS_OF_WEEK)
+        ax.set_yticks(range(8, 21))
+        ax.grid(axis='y', linestyle='--', alpha=0.5)
+        ax.tick_params(axis='x', length=0)
+        
+        # Combine events + mutual
+        events_to_draw = info['data'] + mutual_gaps
+        
+        for e in events_to_draw:
+            if e['day'] not in day_map_idx: continue
+            
+            x = day_map_idx[e['day']]
+            y = e['start']
+            height = e['duration']
+            etype = e.get('type', 'Class')
+            
+            # Skip non-mutual gaps to keep it clean, or draw them lightly
+            if etype == 'Gap' and not e.get('is_mutual'):
+                continue
+                
+            rect = patches.Rectangle(
+                (x, y), 1, height, 
+                linewidth=1, 
+                edgecolor=edge_colors.get(etype, '#999'), 
+                facecolor=colors.get(etype, '#eee'),
+                zorder=10 if etype == "Mutual" else 5
+            )
+            ax.add_patch(rect)
+            
+            # Text
+            label = "MUTUAL BREAK" if etype == "Mutual" else f"{e['subject']}\n{e['location']}"
+            if height >= 0.5: # Only label if enough space
+                ax.text(
+                    x + 0.5, y + 0.5 * height, 
+                    label, 
+                    ha='center', va='center', 
+                    fontsize=7 if etype != "Mutual" else 8,
+                    fontweight='bold' if etype == "Mutual" else 'normal',
+                    color='#e67700' if etype == "Mutual" else '#333',
+                    wrap=True, clip_on=True, zorder=15
+                )
+
+        # Draw vertical lines for days
+        for x in range(1, 5):
+            ax.axvline(x, color='#eee', linewidth=1)
+
+    # Save to buffer
+    buf = BytesIO()
+    plt.savefig(buf, format="png", bbox_inches='tight', dpi=150)
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
 # --- CSS / UI Components ---
 
@@ -549,6 +633,20 @@ if is_valid:
                 st.subheader(f"{'👤' if name=='Me' else '👥'} {info['intake']} ({info['group']})")
                 st.markdown(render_grid_html(display_events), unsafe_allow_html=True)
             idx += 1
+            
+        # 4. Download Image Feature
+        st.write("---")
+        if st.checkbox("Show Export Options"):
+            with st.spinner("Generating image..."):
+                img_buf = generate_schedule_image(schedules_map, mutual_gaps)
+                st.image(img_buf, caption="Preview", width=800)
+                st.download_button(
+                    label="📷 Download Comparison Image",
+                    data=img_buf,
+                    file_name="makan_schedule.png",
+                    mime="image/png"
+                )
 
 else:
     st.info("Please select intakes and groups for all active friends.")
+
