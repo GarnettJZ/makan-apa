@@ -38,22 +38,25 @@ def fetch_s3_data():
         return []
 
 @st.cache_data
-def get_intakes(data):
+def get_intakes():
     """Extracts unique sorted intake codes from S3 data."""
+    data = fetch_s3_data()
     if not data: return []
     intakes = sorted(list(set(item['INTAKE'] for item in data if 'INTAKE' in item)))
     return intakes
 
 @st.cache_data
-def get_groups(data, intake_code):
+def get_groups(intake_code):
     """Extracts unique sorted groups for a specific intake."""
+    data = fetch_s3_data()
     if not data: return []
     groups = sorted(list(set(item['GROUPING'] for item in data if item.get('INTAKE') == intake_code)))
     return groups
 
 @st.cache_data
-def get_available_weeks(data):
+def get_available_weeks():
     """Extracts available weeks from the dataset."""
+    data = fetch_s3_data()
     if not data: return []
     dates = set()
     for item in data:
@@ -75,8 +78,9 @@ def parse_iso_time(iso_str):
         return None
 
 @st.cache_data
-def process_s3_schedule(_data, intake_code, group_code, week_date_str=None):
+def process_s3_schedule(intake_code, group_code, week_date_str=None):
     """Processes S3 data for a specific intake and group."""
+    data = fetch_s3_data()
     schedule = []
     
     # Filter data
@@ -89,7 +93,7 @@ def process_s3_schedule(_data, intake_code, group_code, week_date_str=None):
         # End of the week (Sunday)
         week_end_dt = week_start_dt + timedelta(days=6)
     
-    for item in _data:
+    for item in data:
         if item.get('INTAKE') != intake_code or item.get('GROUPING') != group_code:
             continue
             
@@ -143,19 +147,29 @@ def process_s3_schedule(_data, intake_code, group_code, week_date_str=None):
         
     return schedule
 
-def calculate_gaps(schedule):
-    """Calculates gaps between classes for each day."""
+def _schedule_to_key(schedule):
+    """Convert schedule list to a hashable tuple for caching."""
+    return tuple(
+        (e['day'], e['start'], e['end'], e['subject'], e['type'], e['location'])
+        for e in schedule
+    )
+
+@st.cache_data
+def calculate_gaps_cached(_schedule_key):
+    """Calculates gaps between classes for each day (cached version)."""
     gaps = []
-    # Process each day independently
+    # Reconstruct minimal info needed from key
+    schedule = [{'day': e[0], 'start': e[1], 'end': e[2]} for e in _schedule_key]
+    
     for day in DAYS_OF_WEEK:
         day_events = sorted([e for e in schedule if e['day'] == day], key=lambda x: x['start'])
         
-        current_time = 8.0 # Start of day
+        current_time = 8.0
         
         for event in day_events:
             if event['start'] > current_time:
                 duration = event['start'] - current_time
-                if duration >= 0.25: # Minimum 15 mins
+                if duration >= 0.25:
                     gaps.append({
                         'day': day,
                         'start': current_time,
@@ -169,6 +183,10 @@ def calculate_gaps(schedule):
             current_time = max(current_time, event['end'])
             
     return gaps
+
+def calculate_gaps(schedule):
+    """Calculates gaps between classes for each day."""
+    return calculate_gaps_cached(_schedule_to_key(schedule))
 
 def intersect_two_gap_lists(list1, list2):
     """Helper: Finds intersection between two lists of gaps."""
@@ -388,8 +406,23 @@ def inject_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
-def render_grid_html(events):
-    """Generates the HTML structure for the grid."""
+def _events_to_key(events):
+    """Convert events list to a hashable tuple for caching."""
+    return tuple(
+        (e['day'], e['start'], e['end'], e['duration'], e.get('subject', ''), 
+         e.get('type', 'Class'), e.get('location', ''), e['is_gap'], e.get('is_mutual', False))
+        for e in events
+    )
+
+@st.cache_data
+def render_grid_html_cached(_events_key):
+    """Cached version of grid HTML generation."""
+    # Reconstruct events from key
+    events = [
+        {'day': e[0], 'start': e[1], 'end': e[2], 'duration': e[3], 'subject': e[4],
+         'type': e[5], 'location': e[6], 'is_gap': e[7], 'is_mutual': e[8]}
+        for e in _events_key
+    ]
     
     html = ['<div class="timetable-grid">']
     
@@ -407,29 +440,25 @@ def render_grid_html(events):
     for i in range(total_slots + 1):
         row = i + 2
         
-        # Grid line for every 15 mins
         line_class = "grid-line"
         if i % 4 == 0: line_class += " grid-line-major"
         html.append(f'<div class="{line_class}" style="grid-row: {row};"></div>')
 
-        # Time Labels
-        if i % 2 == 0: # Every 30 mins
+        if i % 2 == 0:
             time_val = start_hour + (i / 4)
             hour = int(time_val)
             minute = int((time_val % 1) * 60)
             time_str = f"{hour:02}:{minute:02}"
             
             label_class = "time-label"
-            if i % 4 != 0: label_class += " time-label-minor" # 30 min marks are minor
+            if i % 4 != 0: label_class += " time-label-minor"
             
             html.append(f'<div class="{label_class}" style="grid-row: {row};">{time_str}</div>')
             
     # Events
     for e in events:
-        day_idx = DAYS_OF_WEEK.index(e['day']) + 2 # Col 1 is time, Col 2 is Mon...
+        day_idx = DAYS_OF_WEEK.index(e['day']) + 2
         
-        # Calculate Row positions (Start at 8:00 = row 2)
-        # Formula: (Time - 8) * 4 + 2
         start_row = int((e['start'] - 8) * 4) + 2
         span = int(e['duration'] * 4)
         end_row = start_row + span
@@ -449,6 +478,10 @@ def render_grid_html(events):
     html.append('</div>')
     return "\n".join(html)
 
+def render_grid_html(events):
+    """Generates the HTML structure for the grid."""
+    return render_grid_html_cached(_events_to_key(events))
+
 # --- Main App Logic ---
 
 st.title("🍱 Bila Nak Makan?")
@@ -456,9 +489,10 @@ st.title("🍱 Bila Nak Makan?")
 inject_custom_css()
 
 # Fetch all data first
-s3_data = fetch_s3_data()
-all_intakes = get_intakes(s3_data)
-available_weeks = get_available_weeks(s3_data)
+# Fetch all data first (Implicitly handled by cached functions now)
+# s3_data = fetch_s3_data() 
+all_intakes = get_intakes()
+available_weeks = get_available_weeks()
 
 # --- State Management & Persistence ---
 
@@ -496,7 +530,7 @@ with cols[0]:
         my_ix = filtered_my_intakes.index(default_my_intake)
         
     my_intake = st.selectbox("Select My Intake", filtered_my_intakes, index=my_ix, key="my_intake_code")
-    my_groups = get_groups(s3_data, my_intake)
+    my_groups = get_groups(my_intake)
     
     my_g_ix = 0
     if default_my_group in my_groups:
@@ -517,7 +551,7 @@ with cols[1]:
          f_ix = filtered_friend_intakes.index(default_friend_intake)
     
     friend_intake = st.selectbox("Select Friend 1", filtered_friend_intakes, index=f_ix, key="friend_intake_code")
-    friend_groups = get_groups(s3_data, friend_intake)
+    friend_groups = get_groups(friend_intake)
     
     f_g_ix = 0
     if default_friend_group in friend_groups:
@@ -542,7 +576,7 @@ if show_friend_2:
              f2_ix = filtered_friend2_intakes.index(default_friend2_intake)
         
         friend2_intake = st.selectbox("Select Friend 2", filtered_friend2_intakes, index=f2_ix, key="friend2_intake_code")
-        friend2_groups = get_groups(s3_data, friend2_intake)
+        friend2_groups = get_groups(friend2_intake)
         
         f2_g_ix = 0
         if default_friend2_group in friend2_groups:
@@ -589,8 +623,8 @@ if is_valid:
         if "friend2_group" in st.query_params: del st.query_params["friend2_group"]
     
     # Process Schedules
-    my_schedule = process_s3_schedule(s3_data, my_intake, my_group, selected_week)
-    friend_schedule = process_s3_schedule(s3_data, friend_intake, friend_group, selected_week)
+    my_schedule = process_s3_schedule(my_intake, my_group, selected_week)
+    friend_schedule = process_s3_schedule(friend_intake, friend_group, selected_week)
     
     schedules_map = {
         "Me": {"data": my_schedule, "intake": my_intake, "group": my_group},
@@ -598,7 +632,7 @@ if is_valid:
     }
     
     if show_friend_2:
-        f2_schedule = process_s3_schedule(s3_data, friend2_intake, friend2_group, selected_week)
+        f2_schedule = process_s3_schedule(friend2_intake, friend2_group, selected_week)
         schedules_map["Friend 2"] = {"data": f2_schedule, "intake": friend2_intake, "group": friend2_group}
 
     # Check for empty schedules
