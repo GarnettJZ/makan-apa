@@ -74,7 +74,8 @@ def parse_iso_time(iso_str):
     except:
         return None
 
-def process_s3_schedule(data, intake_code, group_code, week_date_str=None):
+@st.cache_data
+def process_s3_schedule(_data, intake_code, group_code, week_date_str=None):
     """Processes S3 data for a specific intake and group."""
     schedule = []
     
@@ -88,7 +89,7 @@ def process_s3_schedule(data, intake_code, group_code, week_date_str=None):
         # End of the week (Sunday)
         week_end_dt = week_start_dt + timedelta(days=6)
     
-    for item in data:
+    for item in _data:
         if item.get('INTAKE') != intake_code or item.get('GROUPING') != group_code:
             continue
             
